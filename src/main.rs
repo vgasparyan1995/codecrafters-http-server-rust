@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     format,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
@@ -6,6 +7,11 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use itertools::Itertools;
+
+const CODE_200_OK: &str = "200 OK";
+const CODE_400_BAD_REQUEST: &str = "400 Bad Request";
+const CODE_404_NOT_FOUND: &str = "404 Not Found";
 
 enum HttpMethod {
     Get,
@@ -18,26 +24,67 @@ struct HttpRequest {
     version: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct HttpResponse {
     version: String,
-    code: i32,
-    msg: String,
+    code: &'static str,
+    headers: HashMap<String, String>,
+    content: String,
 }
 
 fn handle(req: HttpRequest) -> HttpResponse {
+    match req.method {
+        HttpMethod::Get => handle_get(req),
+        HttpMethod::Post => handle_post(req),
+    }
+}
+
+fn handle_get(req: HttpRequest) -> HttpResponse {
     if req.path == "/" {
-        HttpResponse {
+        return HttpResponse {
             version: req.version,
-            code: 200,
-            msg: "OK".to_owned(),
-        }
-    } else {
-        HttpResponse {
+            code: CODE_200_OK,
+            ..Default::default()
+        };
+    }
+
+    if req.path.starts_with("/echo/") {
+        return handle_echo(req);
+    }
+
+    HttpResponse {
+        version: req.version,
+        code: CODE_404_NOT_FOUND,
+        ..Default::default()
+    }
+}
+
+fn handle_post(req: HttpRequest) -> HttpResponse {
+    HttpResponse {
+        version: req.version,
+        code: CODE_404_NOT_FOUND,
+        ..Default::default()
+    }
+}
+
+fn handle_echo(req: HttpRequest) -> HttpResponse {
+    match req.path.strip_prefix("/echo/") {
+        Some(msg) => HttpResponse {
             version: req.version,
-            code: 404,
-            msg: "Not Found".to_owned(),
-        }
+            code: CODE_200_OK,
+            headers: [
+                ("Content-Type".to_owned(), "text/plain".to_owned()),
+                ("Content-Length".to_owned(), msg.len().to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            content: msg.to_owned(),
+        },
+        None => HttpResponse {
+            version: req.version,
+            code: CODE_400_BAD_REQUEST,
+            ..Default::default()
+        },
     }
 }
 
@@ -88,10 +135,19 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
 }
 
 fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
+    let version = response.version;
+    let code = response.code;
+    let headers = response
+        .headers
+        .into_iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .join("");
+    let content = response.content;
     Ok(stream.write_all(
         format!(
-            "{} {} {}\r\n\r\n",
-            response.version, response.code, response.msg
+            "{version} {code}\r\n\
+            {headers}\r\n\
+            {content}"
         )
         .as_bytes(),
     )?)
