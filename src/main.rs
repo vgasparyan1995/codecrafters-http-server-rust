@@ -22,6 +22,7 @@ struct HttpRequest {
     method: HttpMethod,
     path: String,
     version: String,
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +53,10 @@ fn handle_get(req: HttpRequest) -> HttpResponse {
         return handle_echo(req);
     }
 
+    if req.path == "/user-agent" {
+        return handle_user_agent(req);
+    }
+
     HttpResponse {
         version: req.version,
         code: CODE_404_NOT_FOUND,
@@ -79,6 +84,27 @@ fn handle_echo(req: HttpRequest) -> HttpResponse {
             .into_iter()
             .collect(),
             content: msg.to_owned(),
+        },
+        None => HttpResponse {
+            version: req.version,
+            code: CODE_400_BAD_REQUEST,
+            ..Default::default()
+        },
+    }
+}
+
+fn handle_user_agent(req: HttpRequest) -> HttpResponse {
+    match req.headers.get(&"User-Agent".to_owned()) {
+        Some(user_agent) => HttpResponse {
+            version: req.version,
+            code: CODE_200_OK,
+            headers: [
+                ("Content-Type".to_owned(), "text/plain".to_owned()),
+                ("Content-Length".to_owned(), user_agent.len().to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            content: user_agent.clone(),
         },
         None => HttpResponse {
             version: req.version,
@@ -127,10 +153,19 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     };
     let path = start_line.next().context("path not found")?.to_owned();
     let version = start_line.next().context("version not found")?.to_owned();
+    let headers = http_req_lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| {
+            line.split_once(": ")
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        })
+        .collect::<HashMap<_, _>>();
     Ok(HttpRequest {
         method,
         path,
         version,
+        headers,
     })
 }
 
