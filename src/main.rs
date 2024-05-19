@@ -33,6 +33,27 @@ struct HttpResponse {
     content: String,
 }
 
+impl HttpResponse {
+    fn in_response_to(mut self, req: &HttpRequest) -> HttpResponse {
+        self.version = req.version.clone();
+        self
+    }
+
+    fn with_code(mut self, code: &'static str) -> HttpResponse {
+        self.code = code;
+        self
+    }
+
+    fn with_content(mut self, content: &str) -> HttpResponse {
+        self.content = content.to_string();
+        self.headers
+            .insert("Content-Type".to_owned(), "text/plain".to_owned());
+        self.headers
+            .insert("Content-Length".to_owned(), content.len().to_string());
+        self
+    }
+}
+
 fn handle(req: HttpRequest) -> HttpResponse {
     match req.method {
         HttpMethod::Get => handle_get(req),
@@ -41,12 +62,9 @@ fn handle(req: HttpRequest) -> HttpResponse {
 }
 
 fn handle_get(req: HttpRequest) -> HttpResponse {
+    let rsp = HttpResponse::default().in_response_to(&req);
     if req.path == "/" {
-        return HttpResponse {
-            version: req.version,
-            code: CODE_200_OK,
-            ..Default::default()
-        };
+        return rsp.with_code(CODE_200_OK);
     }
 
     if req.path.starts_with("/echo/") {
@@ -57,60 +75,36 @@ fn handle_get(req: HttpRequest) -> HttpResponse {
         return handle_user_agent(req);
     }
 
-    HttpResponse {
-        version: req.version,
-        code: CODE_404_NOT_FOUND,
-        ..Default::default()
-    }
+    rsp.with_code(CODE_404_NOT_FOUND)
 }
 
 fn handle_post(req: HttpRequest) -> HttpResponse {
-    HttpResponse {
-        version: req.version,
-        code: CODE_404_NOT_FOUND,
-        ..Default::default()
-    }
+    HttpResponse::default()
+        .in_response_to(&req)
+        .with_code(CODE_404_NOT_FOUND)
 }
 
 fn handle_echo(req: HttpRequest) -> HttpResponse {
     match req.path.strip_prefix("/echo/") {
-        Some(msg) => HttpResponse {
-            version: req.version,
-            code: CODE_200_OK,
-            headers: [
-                ("Content-Type".to_owned(), "text/plain".to_owned()),
-                ("Content-Length".to_owned(), msg.len().to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            content: msg.to_owned(),
-        },
-        None => HttpResponse {
-            version: req.version,
-            code: CODE_400_BAD_REQUEST,
-            ..Default::default()
-        },
+        Some(msg) => HttpResponse::default()
+            .in_response_to(&req)
+            .with_code(CODE_200_OK)
+            .with_content(msg),
+        None => HttpResponse::default()
+            .in_response_to(&req)
+            .with_code(CODE_400_BAD_REQUEST),
     }
 }
 
 fn handle_user_agent(req: HttpRequest) -> HttpResponse {
     match req.headers.get(&"User-Agent".to_owned()) {
-        Some(user_agent) => HttpResponse {
-            version: req.version,
-            code: CODE_200_OK,
-            headers: [
-                ("Content-Type".to_owned(), "text/plain".to_owned()),
-                ("Content-Length".to_owned(), user_agent.len().to_string()),
-            ]
-            .into_iter()
-            .collect(),
-            content: user_agent.clone(),
-        },
-        None => HttpResponse {
-            version: req.version,
-            code: CODE_400_BAD_REQUEST,
-            ..Default::default()
-        },
+        Some(user_agent) => HttpResponse::default()
+            .in_response_to(&req)
+            .with_code(CODE_200_OK)
+            .with_content(user_agent),
+        None => HttpResponse::default()
+            .in_response_to(&req)
+            .with_code(CODE_400_BAD_REQUEST),
     }
 }
 
