@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    format,
+    env, format, fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     println, thread,
@@ -12,6 +12,23 @@ use itertools::Itertools;
 const CODE_200_OK: &str = "200 OK";
 const CODE_400_BAD_REQUEST: &str = "400 Bad Request";
 const CODE_404_NOT_FOUND: &str = "404 Not Found";
+const CODE_500_INTERNAL_SERVER_ERROR: &str = "500 Internal Server Error";
+
+#[derive(Default, Clone)]
+struct Config {
+    directory: Option<String>,
+}
+
+fn parse_config() -> Config {
+    let args = env::args().collect_vec();
+    if args.len() == 3 && args[1] == "--directory" {
+        Config {
+            directory: Some(args[2].clone()),
+        }
+    } else {
+        Config::default()
+    }
+}
 
 enum HttpMethod {
     Get,
@@ -30,7 +47,7 @@ struct HttpResponse {
     version: String,
     code: &'static str,
     headers: HashMap<String, String>,
-    content: String,
+    content: Vec<u8>,
 }
 
 impl HttpResponse {
@@ -45,34 +62,49 @@ impl HttpResponse {
     }
 
     fn with_content(mut self, content: &str) -> HttpResponse {
-        self.content = content.to_string();
+        self.content = content.bytes().collect_vec();
         self.headers
             .insert("Content-Type".to_owned(), "text/plain".to_owned());
         self.headers
             .insert("Content-Length".to_owned(), content.len().to_string());
         self
     }
+
+    fn with_binary_content(mut self, content: Vec<u8>) -> HttpResponse {
+        self.headers.insert(
+            "Content-Type".to_owned(),
+            "application/octet-stream".to_owned(),
+        );
+        self.headers
+            .insert("Content-Length".to_owned(), content.len().to_string());
+        self.content = content;
+        self
+    }
 }
 
-fn handle(req: HttpRequest) -> HttpResponse {
+fn handle(req: HttpRequest, config: &Config) -> HttpResponse {
     match req.method {
-        HttpMethod::Get => handle_get(req),
+        HttpMethod::Get => handle_get(req, config),
         HttpMethod::Post => handle_post(req),
     }
 }
 
-fn handle_get(req: HttpRequest) -> HttpResponse {
+fn handle_get(req: HttpRequest, config: &Config) -> HttpResponse {
     let rsp = HttpResponse::default().in_response_to(&req);
     if req.path == "/" {
         return rsp.with_code(CODE_200_OK);
+    }
+
+    if req.path == "/user-agent" {
+        return handle_user_agent(req);
     }
 
     if req.path.starts_with("/echo/") {
         return handle_echo(req);
     }
 
-    if req.path == "/user-agent" {
-        return handle_user_agent(req);
+    if req.path.starts_with("/files/") {
+        return handle_files(req, config);
     }
 
     rsp.with_code(CODE_404_NOT_FOUND)
@@ -94,6 +126,29 @@ fn handle_echo(req: HttpRequest) -> HttpResponse {
             .in_response_to(&req)
             .with_code(CODE_400_BAD_REQUEST),
     }
+}
+
+fn handle_files(req: HttpRequest, config: &Config) -> HttpResponse {
+    let rsp = HttpResponse::default().in_response_to(&req);
+    if config.directory.is_none() {
+        return rsp.with_code(CODE_500_INTERNAL_SERVER_ERROR);
+    }
+    let filename = req.path.strip_prefix("/files/");
+    if filename.is_none() {
+        return rsp.with_code(CODE_400_BAD_REQUEST);
+    }
+    let filename = format!(
+        "{}/{}",
+        config.directory.as_ref().unwrap(),
+        filename.unwrap()
+    );
+    let file_content = fs::read(filename);
+    if file_content.is_err() {
+        return rsp.with_code(CODE_404_NOT_FOUND);
+    }
+    return rsp
+        .with_code(CODE_200_OK)
+        .with_binary_content(file_content.unwrap());
 }
 
 fn handle_user_agent(req: HttpRequest) -> HttpResponse {
@@ -171,28 +226,24 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
         .into_iter()
         .map(|(k, v)| format!("{k}: {v}\r\n"))
         .join("");
-    let content = response.content;
-    Ok(stream.write_all(
-        format!(
-            "{version} {code}\r\n\
-            {headers}\r\n\
-            {content}"
-        )
-        .as_bytes(),
-    )?)
+    stream.write_all(format!("{version} {code}\r\n{headers}\r\n").as_bytes())?;
+    stream.write_all(&response.content[..])?;
+    Ok(())
 }
 
 fn main() {
+    let config = parse_config();
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     for stream in listener.incoming() {
-        thread::spawn(|| match stream {
+        let config = config.clone();
+        thread::spawn(move || match stream {
             Ok(mut stream) => {
                 println!(
                     "accepted new connection on thread {:?}",
                     thread::current().id()
                 );
                 let req = read_request(&mut stream).expect("Failed reading request");
-                let res = handle(req);
+                let res = handle(req, &config);
                 write_response(&mut stream, res).expect("Failed writing response");
             }
             Err(e) => {
