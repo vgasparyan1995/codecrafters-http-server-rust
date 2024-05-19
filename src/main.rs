@@ -3,7 +3,7 @@ use std::{
     format,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
-    println,
+    println, thread,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -185,9 +185,12 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     for stream in listener.incoming() {
-        match stream {
+        thread::spawn(|| match stream {
             Ok(mut stream) => {
-                println!("accepted new connection");
+                println!(
+                    "accepted new connection on thread {:?}",
+                    thread::current().id()
+                );
                 let req = read_request(&mut stream).expect("Failed reading request");
                 let res = handle(req);
                 write_response(&mut stream, res).expect("Failed writing response");
@@ -195,6 +198,6 @@ fn main() {
             Err(e) => {
                 println!("error: {}", e);
             }
-        }
+        });
     }
 }
