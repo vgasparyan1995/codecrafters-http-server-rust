@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env, format, fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     println, thread,
 };
@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 
 const CODE_200_OK: &str = "200 OK";
+const CODE_201_CREATED: &str = "201 Created";
 const CODE_400_BAD_REQUEST: &str = "400 Bad Request";
 const CODE_404_NOT_FOUND: &str = "404 Not Found";
 const CODE_500_INTERNAL_SERVER_ERROR: &str = "500 Internal Server Error";
@@ -40,6 +41,7 @@ struct HttpRequest {
     path: String,
     version: String,
     headers: HashMap<String, String>,
+    content: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -85,12 +87,13 @@ impl HttpResponse {
 fn handle(req: HttpRequest, config: &Config) -> HttpResponse {
     match req.method {
         HttpMethod::Get => handle_get(req, config),
-        HttpMethod::Post => handle_post(req),
+        HttpMethod::Post => handle_post(req, config),
     }
 }
 
 fn handle_get(req: HttpRequest, config: &Config) -> HttpResponse {
     let rsp = HttpResponse::default().in_response_to(&req);
+
     if req.path == "/" {
         return rsp.with_code(CODE_200_OK);
     }
@@ -110,7 +113,11 @@ fn handle_get(req: HttpRequest, config: &Config) -> HttpResponse {
     rsp.with_code(CODE_404_NOT_FOUND)
 }
 
-fn handle_post(req: HttpRequest) -> HttpResponse {
+fn handle_post(req: HttpRequest, config: &Config) -> HttpResponse {
+    if req.path.starts_with("/files/") {
+        return handle_post_files(req, config);
+    }
+
     HttpResponse::default()
         .in_response_to(&req)
         .with_code(CODE_404_NOT_FOUND)
@@ -128,27 +135,50 @@ fn handle_echo(req: HttpRequest) -> HttpResponse {
     }
 }
 
-fn handle_files(req: HttpRequest, config: &Config) -> HttpResponse {
+fn handle_file_helper(req: HttpRequest, config: &Config) -> Result<String, HttpResponse> {
     let rsp = HttpResponse::default().in_response_to(&req);
     if config.directory.is_none() {
-        return rsp.with_code(CODE_500_INTERNAL_SERVER_ERROR);
+        return Err(rsp.with_code(CODE_500_INTERNAL_SERVER_ERROR));
     }
     let filename = req.path.strip_prefix("/files/");
     if filename.is_none() {
-        return rsp.with_code(CODE_400_BAD_REQUEST);
+        return Err(rsp.with_code(CODE_400_BAD_REQUEST));
     }
     let filename = format!(
         "{}/{}",
         config.directory.as_ref().unwrap(),
         filename.unwrap()
     );
-    let file_content = fs::read(filename);
-    if file_content.is_err() {
-        return rsp.with_code(CODE_404_NOT_FOUND);
+    Ok(filename)
+}
+
+fn handle_files(req: HttpRequest, config: &Config) -> HttpResponse {
+    let rsp = HttpResponse::default().in_response_to(&req);
+    match handle_file_helper(req, config) {
+        Err(err) => return err,
+        Ok(filename) => {
+            let file_content = fs::read(filename);
+            if file_content.is_err() {
+                return rsp.with_code(CODE_404_NOT_FOUND);
+            }
+            return rsp
+                .with_code(CODE_200_OK)
+                .with_binary_content(file_content.unwrap());
+        }
     }
-    return rsp
-        .with_code(CODE_200_OK)
-        .with_binary_content(file_content.unwrap());
+}
+
+fn handle_post_files(mut req: HttpRequest, config: &Config) -> HttpResponse {
+    let rsp = HttpResponse::default().in_response_to(&req);
+    let file_content = req.content;
+    req.content = Vec::new();
+    match handle_file_helper(req, config) {
+        Err(err) => return err,
+        Ok(filename) => match fs::write(filename, file_content) {
+            Ok(_) => return rsp.with_code(CODE_201_CREATED),
+            Err(_) => return rsp.with_code(CODE_400_BAD_REQUEST),
+        },
+    }
 }
 
 fn handle_user_agent(req: HttpRequest) -> HttpResponse {
@@ -163,7 +193,7 @@ fn handle_user_agent(req: HttpRequest) -> HttpResponse {
     }
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<Vec<String>> {
+fn read_http_request(stream: &mut TcpStream) -> Result<(Vec<String>, BufReader<&mut TcpStream>)> {
     let mut result = vec![];
     let mut reader = BufReader::new(stream);
     loop {
@@ -182,11 +212,11 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Vec<String>> {
             _ => return Err(anyhow!("Failed reading http request")),
         };
     }
-    Ok(result)
+    Ok((result, reader))
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
-    let http_req_lines = read_http_request(stream)?;
+    let (http_req_lines, reader) = read_http_request(stream)?;
     let mut start_line = http_req_lines
         .iter()
         .next()
@@ -210,12 +240,28 @@ fn read_request(stream: &mut TcpStream) -> Result<HttpRequest> {
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
         })
         .collect::<HashMap<_, _>>();
+    let content = read_request_content(reader, &headers).unwrap_or(vec![]);
     Ok(HttpRequest {
         method,
         path,
         version,
         headers,
+        content,
     })
+}
+
+fn read_request_content(
+    mut reader: BufReader<&mut TcpStream>,
+    headers: &HashMap<String, String>,
+) -> Option<Vec<u8>> {
+    headers
+        .get(&"Content-Length".to_string())
+        .and_then(|length| length.parse::<usize>().ok())
+        .and_then(|length| {
+            let mut content = vec![0; length];
+            reader.read_exact(&mut content).ok()?;
+            Some(content)
+        })
 }
 
 fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
